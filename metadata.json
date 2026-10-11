@@ -1,0 +1,6 @@
+{
+  "name": "まなびAI | 教室用学習アシスタント＆指導ダッシュボード",
+  "description": "中学校・高校向けの対話型AI学習支援チャットボット＆教員用リアルタイムモニタリングダッシュボード",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

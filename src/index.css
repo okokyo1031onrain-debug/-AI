@@ -1,0 +1,51 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+:root {
+  --color-paper: #FDFCF8;
+  --color-paper-subtle: #F6F5EE;
+  --color-soft-gray: #E5E4DE;
+  --color-border-subtle: #D8D6CE;
+  --color-olive: #5A5A40;
+  --color-olive-dark: #43432F;
+  --color-olive-light: #F0EFE9;
+  --color-charcoal: #2A2925;
+  --color-charcoal-muted: #626058;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-charcoal);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar for clean educational aesthetic */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #D8D6CE;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #B6B4AB;
+}
+
+/* KaTeX custom sizing tweaks for clear classroom math readability */
+.katex-display {
+  margin: 0.75em 0 !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0;
+}
+.katex {
+  font-size: 1.08em;
+}
