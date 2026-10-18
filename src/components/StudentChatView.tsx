@@ -9,6 +9,7 @@ import {
   RotateCcw,
   ArrowDown,
   GraduationCap,
+  AlertTriangle,
 } from 'lucide-react';
 import { MathRenderer } from './MathRenderer';
 
@@ -31,8 +32,13 @@ export const StudentChatView: React.FC = () => {
     previewUrl: string;
   } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isCompressingImage, setIsCompressingImage] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+  const [lastFailedRequest, setLastFailedRequest] = useState<{
+    text: string;
+    image?: { data: string; mimeType: string; previewUrl: string } | null;
+  } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -56,11 +62,11 @@ export const StudentChatView: React.FC = () => {
   }, []);
 
   // Send message to server (stateless on-the-spot response)
-  const handleSendMessage = async (textToSend?: string) => {
+  const handleSendMessage = async (textToSend?: string, imageToSend?: { data: string; mimeType: string; previewUrl: string } | null) => {
     const text = (textToSend !== undefined ? textToSend : inputText).trim();
-    if ((!text && !selectedImage) || isLoading) return;
+    const currentImage = imageToSend !== undefined ? imageToSend : selectedImage;
 
-    const currentImage = selectedImage;
+    if ((!text && !currentImage) || isLoading) return;
 
     // Optimistic UI update: Immediately display user message
     const tempUserId = 'user-' + Date.now();
@@ -115,9 +121,12 @@ export const StudentChatView: React.FC = () => {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data.success) {
-        const errorMsg = data.details || data.error || 'AIからの応答を取得できませんでした';
+        const errorMsg = data.error || data.details || 'AIからの応答を取得できませんでした';
         throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
       }
+
+      // Success: clear failed retry cache
+      setLastFailedRequest(null);
 
       // Add AI reply
       const newAiMessage: Message = {
@@ -136,10 +145,19 @@ export const StudentChatView: React.FC = () => {
       }
     } catch (err: any) {
       console.error('Chat error:', err);
+      // Cache last failed request for quick retry button
+      setLastFailedRequest({ text, image: currentImage });
+
+      const rawMsg = String(err?.message || '');
+      let displayError = '現在、AIサーバーへのアクセスが集中しています。下の「もう一度送信する」ボタンを押して再試行してください。';
+      if (!rawMsg.includes('503') && !rawMsg.includes('混雑') && rawMsg.length > 5) {
+        displayError = `${displayError} (${rawMsg})`;
+      }
+
       const errorMessage: Message = {
         id: 'err-' + Date.now(),
         role: 'model',
-        text: `通信エラーが発生しました。（${err?.message || '接続エラー'}）もう一度送信をお試しください。`,
+        text: displayError,
         timestamp: new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
         isError: true,
       };
@@ -149,30 +167,73 @@ export const StudentChatView: React.FC = () => {
     }
   };
 
-  // Handle image upload
-  const handleImageFile = (file: File) => {
+  // Compress image file on client side to prevent school Wi-Fi timeouts and huge memory spikes
+  const compressImageFile = (file: File): Promise<{ data: string; mimeType: string; previewUrl: string }> => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const src = e.target?.result as string;
+        const img = new Image();
+        img.onload = () => {
+          const maxDimension = 1280;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            const compressed = canvas.toDataURL('image/jpeg', 0.78);
+            resolve({
+              data: compressed,
+              mimeType: 'image/jpeg',
+              previewUrl: compressed,
+            });
+            return;
+          }
+
+          resolve({ data: src, mimeType: file.type, previewUrl: src });
+        };
+        img.onerror = () => {
+          resolve({ data: src, mimeType: file.type, previewUrl: src });
+        };
+        img.src = src;
+      };
+      reader.onerror = () => {
+        alert('画像の読み込みに失敗しました。');
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Handle image upload with auto-compression
+  const handleImageFile = async (file: File) => {
     if (!file.type.startsWith('image/')) {
       alert('画像ファイル（PNG、JPEGなど）を選択してください。');
       return;
     }
 
-    if (file.size > 10 * 1024 * 1024) {
-      alert('画像サイズは10MB以下にしてください。');
-      return;
+    try {
+      setIsCompressingImage(true);
+      const compressed = await compressImageFile(file);
+      setSelectedImage(compressed);
+    } catch {
+      alert('画像の処理中にエラーが発生しました。');
+    } finally {
+      setIsCompressingImage(false);
     }
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      if (result) {
-        setSelectedImage({
-          data: result,
-          mimeType: file.type,
-          previewUrl: result,
-        });
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -194,6 +255,7 @@ export const StudentChatView: React.FC = () => {
     setMessages([]);
     setInputText('');
     setSelectedImage(null);
+    setLastFailedRequest(null);
   };
 
   // Export current conversation note as Markdown
@@ -312,6 +374,8 @@ export const StudentChatView: React.FC = () => {
                     className={`max-w-[85%] sm:max-w-[80%] rounded-2xl px-4 py-3 relative ${
                       isUser
                         ? 'bg-[#5A5A40] text-[#FDFCF8] rounded-tr-xs shadow-xs'
+                        : message.isError
+                        ? 'bg-amber-50/80 border border-amber-200 text-[#2A2925] rounded-tl-xs shadow-2xs'
                         : 'bg-white border border-[#E5E4DE] text-[#2A2925] rounded-tl-xs shadow-2xs'
                     }`}
                   >
@@ -331,12 +395,31 @@ export const StudentChatView: React.FC = () => {
                       <div className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
                         {message.text}
                       </div>
+                    ) : message.isError ? (
+                      <div className="space-y-2">
+                        <div className="flex items-start space-x-2 text-amber-900 text-[14px] leading-relaxed">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <span>{message.text}</span>
+                        </div>
+                        {lastFailedRequest && (
+                          <div className="pt-1 flex justify-end">
+                            <button
+                              onClick={() => handleSendMessage(lastFailedRequest.text, lastFailedRequest.image || undefined)}
+                              disabled={isLoading}
+                              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-[#5A5A40] hover:bg-[#43432F] text-white text-xs font-medium shadow-xs transition"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>もう一度送信する（再試行）</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <MathRenderer content={message.text} />
                     )}
 
                     {/* AI Message Footer Actions */}
-                    {!isUser && (
+                    {!isUser && !message.isError && (
                       <div className="mt-2.5 pt-2 border-t border-[#E5E4DE]/60 flex items-center justify-end text-xs text-[#626058]">
                         <button
                           onClick={() => handleCopy(message.text, message.id)}
@@ -369,6 +452,7 @@ export const StudentChatView: React.FC = () => {
                   <span className="w-2 h-2 bg-[#5A5A40] rounded-full animate-bounce [animation-delay:-0.3s]" />
                   <span className="w-2 h-2 bg-[#5A5A40] rounded-full animate-bounce [animation-delay:-0.15s]" />
                   <span className="w-2 h-2 bg-[#5A5A40] rounded-full animate-bounce" />
+                  <span className="text-xs text-[#626058] ml-1">先生が回答を準備しています...</span>
                 </div>
               </div>
             )}
@@ -404,6 +488,7 @@ export const StudentChatView: React.FC = () => {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-[#2A2925] truncate">画像を添付中</p>
+                <p className="text-[10px] text-[#626058]">自動軽量化済み</p>
               </div>
               <button
                 onClick={() => setSelectedImage(null)}
@@ -433,8 +518,9 @@ export const StudentChatView: React.FC = () => {
             {/* Photo / Attachment Button */}
             <button
               type="button"
+              disabled={isCompressingImage || isLoading}
               onClick={() => fileInputRef.current?.click()}
-              className="p-2 text-[#626058] hover:text-[#5A5A40] hover:bg-[#F6F5EE] rounded-xl transition shrink-0"
+              className="p-2 text-[#626058] hover:text-[#5A5A40] hover:bg-[#F6F5EE] rounded-xl transition shrink-0 disabled:opacity-50"
               title="ノートや問題集の写真を添付"
             >
               <ImageIcon className="w-5 h-5" />
@@ -454,10 +540,10 @@ export const StudentChatView: React.FC = () => {
             {/* Send Button */}
             <button
               type="button"
-              disabled={(!inputText.trim() && !selectedImage) || isLoading}
+              disabled={(!inputText.trim() && !selectedImage) || isLoading || isCompressingImage}
               onClick={() => handleSendMessage()}
               className={`p-2.5 rounded-xl shrink-0 transition flex items-center justify-center ${
-                (inputText.trim() || selectedImage) && !isLoading
+                (inputText.trim() || selectedImage) && !isLoading && !isCompressingImage
                   ? 'bg-[#5A5A40] hover:bg-[#43432F] text-white shadow-xs'
                   : 'bg-[#E5E4DE] text-[#626058]/40 cursor-not-allowed'
               }`}

@@ -14,7 +14,7 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const server = http.createServer(app);
 
-// Support larger payload for student notebook/worksheet photos
+// Support payload for student notebook/worksheet photos
 app.use(express.json({ limit: '25mb' }));
 
 // Initialize Gemini Client
@@ -27,8 +27,9 @@ const ai = new GoogleGenAI({
   },
 });
 
-// Google AI Studio Free Tier Model (完全無料枠対象モデル: クレジットカード不要・費用ゼロ)
-const FREE_TIER_MODEL = 'gemini-3.8-flash';
+// Google AI Studio Free Tier Models (完全無料枠対象モデル: クレジットカード不要・費用ゼロ)
+// Priority: Gemini 3.8 Flash -> Gemini 3.1 Flash-Lite -> Gemini Flash Latest
+const FREE_TIER_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
 
 // Fixed Educational System Prompt (公立中学校・数学副担任モデル)
 const FIXED_SYSTEM_INSTRUCTION = `あなたは公立中学校の数学の授業で生徒をサポートする「副担任の先生」です。
@@ -55,6 +56,8 @@ const FIXED_SYSTEM_INSTRUCTION = `あなたは公立中学校の数学の授業�
 - 丁寧で親しみやすく、安心感を与える温かい語り口（中学生・高校生に伝わりやすい言葉）で接してください。
 - 威圧的な表現は一切避け、生徒の自己肯定感を高める言葉を選んでください。`;
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Format and sanitize history so Gemini receives strictly alternating turns
  * (user -> model -> user -> model ... -> user) without consecutive duplicate roles.
@@ -70,14 +73,12 @@ function buildAlternatingContents(
       if ((turn.role === 'user' || turn.role === 'model') && typeof turn.text === 'string' && turn.text.trim()) {
         const role = turn.role as 'user' | 'model';
         if (normalizedTurns.length === 0) {
-          // Gemini requires the first turn to be 'user'
           if (role === 'user') {
             normalizedTurns.push({ role: 'user', parts: [{ text: turn.text }] });
           }
         } else {
           const lastTurn = normalizedTurns[normalizedTurns.length - 1];
           if (lastTurn.role === role) {
-            // Combine consecutive turns of the same role
             lastTurn.parts.push({ text: turn.text });
           } else {
             normalizedTurns.push({ role, parts: [{ text: turn.text }] });
@@ -87,13 +88,10 @@ function buildAlternatingContents(
     }
   }
 
-  // The final turn to append is the current 'user' request.
-  // Therefore, the preceding turn MUST be 'model' (or empty).
   while (normalizedTurns.length > 0 && normalizedTurns[normalizedTurns.length - 1].role === 'user') {
     normalizedTurns.pop();
   }
 
-  // Keep last 6 alternating turns to balance context and prompt limits
   const sliced = normalizedTurns.slice(-6);
 
   sliced.push({
@@ -102,6 +100,66 @@ function buildAlternatingContents(
   });
 
   return sliced;
+}
+
+/**
+ * Robust retry and fallback model execution for high classroom concurrency.
+ * If 503 (Overloaded) or 429 (Rate Limit) occurs, retries with backoff and falls back
+ * across free-tier models (3.8 Flash -> 3.1 Flash-Lite -> Flash Latest).
+ */
+async function generateWithRetryAndFallback(contents: any[]): Promise<string> {
+  let lastError: any = null;
+
+  for (let mIdx = 0; mIdx < FREE_TIER_MODELS.length; mIdx++) {
+    const model = FREE_TIER_MODELS[mIdx];
+
+    // Try up to 2 times for each model
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const geminiResponse = await ai.models.generateContent({
+          model: model,
+          contents: contents,
+          config: {
+            systemInstruction: FIXED_SYSTEM_INSTRUCTION,
+            temperature: 0.7,
+          },
+        });
+
+        if (geminiResponse.text) {
+          return geminiResponse.text;
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = String(err?.message || '');
+        const isTransient =
+          errMsg.includes('503') ||
+          errMsg.includes('overloaded') ||
+          errMsg.includes('429') ||
+          errMsg.includes('RESOURCE_EXHAUSTED') ||
+          errMsg.includes('Quota') ||
+          errMsg.includes('unavailable') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('500');
+
+        console.warn(`[AI Attempt] Model ${model} (attempt ${attempt}) failed: ${errMsg.slice(0, 120)}`);
+
+        if (isTransient) {
+          // If overloaded or throttled, wait with jitter before retrying
+          const jitter = Math.floor(Math.random() * 600);
+          await sleep(1000 * attempt + jitter);
+          // If first attempt failed on 503, immediately try next model if on 2nd attempt
+          if (attempt === 2) {
+            break;
+          }
+        } else {
+          // Non-transient error, break immediately to try next model
+          break;
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('Google AIサーバーが混雑しています。');
 }
 
 // POST /api/chat - Stateless instant reply
@@ -140,16 +198,8 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     // Build sanitized alternating contents for Gemini API
     const contents = buildAlternatingContents(history, currentParts);
 
-    const geminiResponse = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: contents,
-      config: {
-        systemInstruction: FIXED_SYSTEM_INSTRUCTION,
-        temperature: 0.7,
-      },
-    });
-
-    const replyText = geminiResponse.text || '先生はいつでも応援しています！もう一度質問を教えてもらえるかな？';
+    // Call with retry and model fallback
+    const replyText = await generateWithRetryAndFallback(contents);
 
     res.json({
       success: true,
@@ -157,9 +207,16 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Chat error on server:', error);
+    const rawMsg = String(error?.message || '');
+    let friendlyMessage = 'AIの応答生成中にエラーが発生しました。';
+
+    if (rawMsg.includes('503') || rawMsg.includes('overloaded') || rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')) {
+      friendlyMessage = '現在GoogleのAIサーバーが混雑しています。少し時間をおいてから「もう一度試す」を押してください。';
+    }
+
     res.status(500).json({
-      error: 'AIの応答生成中にエラーが発生しました。',
-      details: error?.message || 'Unknown error',
+      error: friendlyMessage,
+      details: rawMsg,
     });
   }
 });
